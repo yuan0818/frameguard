@@ -1,7 +1,5 @@
 # FrameGuard · Experimental v0.1
 
-仓库与目录名：`frameguard`。
-
 基于 PyTorch 的图片/视频质量分类实验项目。包含残差 CNN、可选 torchvision
 backbone、训练、评估、图片/视频推理以及权重导出。代码采用 [MIT](LICENSE)。
 
@@ -23,7 +21,8 @@ python scripts/smoke.py
 ```
 
 Windows 激活命令为 `.venv\Scripts\activate`。冒烟在临时目录生成数据、训练
-一轮、评估、推理和导出，不需要下载数据，也不覆盖已有模型。CI 在 Linux CPU
+一轮、评估（验证划分和另行生成的留出集）、推理和导出，不需要下载数据，也不
+覆盖已有模型。CI 在 Linux CPU
 上执行相同检查；实际执行结果见 [验证记录](docs/VALIDATION.md)。
 
 ## 最小训练示例
@@ -60,7 +59,9 @@ photo_mosaic_v00.jpg,mosaic,photo
 ## 推理和模型文件
 
 `src.predict` 支持单张图片、视频或目录。可选 `--ui-analysis`、`--cv-analysis`、
-`--advanced-analysis`；高级模板检测需自行提供模板。新 checkpoint 保存配置和
+`--advanced-analysis`；高级模板检测需自行提供模板（配置 `detectors` 节的
+`template_dir`，或 `--template-dir` 指向含 `crash/`、`elements/` 子目录的目录）。
+检测阈值读取配置的 `detectors` 节。新 checkpoint 保存配置和
 训练/验证 source groups，CLI 默认读取其中的配置；`--config` 可显式覆盖。
 权重严格匹配结构，类数不匹配会明确报错。
 
@@ -76,4 +77,7 @@ photo_mosaic_v00.jpg,mosaic,photo
 
 评估默认拒绝缺少分组记录的旧权重。`--allow-legacy-evaluation` 只用于诊断，
 不能恢复独立性。应从头按新分组训练，并另留不参与选模型/调参的测试集。
+留出集使用与训练数据相同的 `normal/` + `exception/data.csv` 布局，用
+`python -m src.evaluate --checkpoint <ckpt> --data-root <留出集目录>` 评估；
+来源组与训练/验证重叠时会直接报错（按来源名比对，改名的重复文件无法识别）。
 请阅读 [模型说明](docs/MODEL_CARD.md)。

@@ -251,6 +251,7 @@ class PretrainedBackbone(nn.Module):
             self.backbone.classifier = nn.Identity()
 
         # 冻结 backbone
+        self.freeze_backbone = freeze_backbone
         if freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
@@ -277,6 +278,13 @@ class PretrainedBackbone(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+
+    def train(self, mode: bool = True):
+        """冻结的 backbone 始终保持 eval：否则 BatchNorm 的 running stats 仍会被训练数据更新。"""
+        super().train(mode)
+        if self.freeze_backbone:
+            self.backbone.eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone(x)

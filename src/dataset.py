@@ -11,6 +11,7 @@
 
 import os
 import csv
+import posixpath
 import random
 import re
 from pathlib import Path
@@ -129,6 +130,14 @@ EXCEPTION_TYPE_MAP: Dict[str, int] = {
 
 # normal 类别 ID
 NORMAL_CLASS_ID = 0
+
+
+def _normalize_csv_name(name: str) -> str:
+    """CSV file_name → 以 / 分隔、无前导 ./ 的相对路径。"""
+    name = name.strip().replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    return name
 
 
 def map_exception_type(exception_type: str) -> int:
@@ -358,11 +367,11 @@ def scan_exception_samples(
     if "filename" in df.columns and "file_name" not in df.columns:
         df = df.rename(columns={"filename": "file_name"})
 
-    # 构建文件名到异常类型的映射
+    # CSV 行：规范化后的 file_name → 标签 / source_id
     file_label_map: Dict[str, int] = {}
-    source_ids = {}
+    source_ids: Dict[str, str] = {}
     for _, row in df.iterrows():
-        file_name = str(row["file_name"]).strip()
+        file_name = _normalize_csv_name(str(row["file_name"]))
         exception_type = str(row["exception_type"]).strip()
 
         try:
@@ -373,39 +382,49 @@ def scan_exception_samples(
 
         file_label_map[file_name] = class_id
         if "source_id" in row and pd.notna(row["source_id"]):
-            source_ids[file_name] = str(row["source_id"])
+            source_ids[file_name] = str(row["source_id"]).strip()
 
-    # 创建文件名集合用于匹配（支持仅文件名匹配，也支持相对路径匹配）
-    file_label_by_basename: Dict[str, int] = {}
-    for fname, label in file_label_map.items():
-        basename = os.path.basename(fname)
-        # 如果 CSV 中的文件名只是 basename，直接映射
-        file_label_by_basename[basename] = label
+    # 回退索引：同一个键对应多条 CSV 行时视为歧义，不参与匹配，
+    # 避免不同子目录下的同名文件互相拿错标签。
+    def build_index(key_fn: Callable[[str], str]) -> Tuple[Dict[str, str], set]:
+        index: Dict[str, str] = {}
+        ambiguous = set()
+        for name in file_label_map:
+            key = key_fn(name)
+            if key in index and index[key] != name:
+                ambiguous.add(key)
+            index[key] = name
+        for key in ambiguous:
+            del index[key]
+        return index, ambiguous
+
+    by_rel_stem, _ = build_index(lambda n: os.path.splitext(n)[0])
+    by_basename, ambiguous_basenames = build_index(posixpath.basename)
+    by_base_stem, _ = build_index(lambda n: os.path.splitext(posixpath.basename(n))[0])
+    if ambiguous_basenames:
+        print(f"警告: CSV 中有 {len(ambiguous_basenames)} 个文件名在多个路径下重复，"
+              f"这些文件只按相对路径匹配。")
 
     # 扫描目录中的实际文件
     image_paths, video_paths = scan_directory(exception_dir, image_exts, video_exts)
 
-    # 构建实际文件名到标签的映射
-    def find_label(file_path: str) -> Optional[int]:
-        basename = os.path.basename(file_path)
-        rel_path = os.path.relpath(file_path, exception_dir)
+    def find_csv_row(file_path: str) -> Optional[str]:
+        """返回与该文件匹配的 CSV file_name；标签和 source_id 都从同一行读取。"""
+        rel_path = os.path.relpath(file_path, exception_dir).replace(os.sep, "/")
+        basename = posixpath.basename(rel_path)
 
-        # 1. 精确匹配完整文件名
-        if basename in file_label_by_basename:
-            return file_label_by_basename[basename]
-        # 2. 精确匹配相对路径
+        # 1. 相对路径精确匹配
         if rel_path in file_label_map:
-            return file_label_map[rel_path]
-        # 3. 模糊匹配（去掉扩展名后匹配）
-        name_no_ext = os.path.splitext(basename)[0]
-        if name_no_ext in file_label_by_basename:
-            return file_label_by_basename[name_no_ext]
-        # 4. 尝试在 CSV 的 file_name 中查找（CSV 可能包含扩展名也可能不包含）
-        for csv_name, label in file_label_map.items():
-            csv_no_ext = os.path.splitext(csv_name)[0]
-            if csv_no_ext == name_no_ext:
-                return label
-
+            return rel_path
+        # 2. 相对路径去扩展名 → 3. 文件名 → 4. 文件名去扩展名
+        for index, key in (
+            (by_rel_stem, os.path.splitext(rel_path)[0]),
+            (by_basename, basename),
+            (by_base_stem, os.path.splitext(basename)[0]),
+        ):
+            name = index.get(key)
+            if name is not None:
+                return name
         return None
 
     matched_count = 0
@@ -413,13 +432,13 @@ def scan_exception_samples(
 
     # 处理图片文件
     for img_path in image_paths:
-        label = find_label(img_path)
-        if label is not None:
+        csv_name = find_csv_row(img_path)
+        if csv_name is not None:
             samples.append(SampleRecord(
                 source_type="image",
-                label=label,
+                label=file_label_map[csv_name],
                 image_path=img_path,
-                group_id=source_ids.get(os.path.relpath(img_path, exception_dir), source_ids.get(os.path.basename(img_path))),
+                group_id=source_ids.get(csv_name),
             ))
             matched_count += 1
         else:
@@ -427,8 +446,9 @@ def scan_exception_samples(
 
     # 处理视频文件
     for vid_path in video_paths:
-        label = find_label(vid_path)
-        if label is not None:
+        csv_name = find_csv_row(vid_path)
+        if csv_name is not None:
+            label = file_label_map[csv_name]
             try:
                 from .video_utils import get_video_frame_infos
                 frame_infos = get_video_frame_infos(
@@ -442,7 +462,7 @@ def scan_exception_samples(
                         label=label,
                         video_path=vp,
                         frame_index=frame_idx,
-                        group_id=source_ids.get(os.path.relpath(vid_path, exception_dir), source_ids.get(os.path.basename(vid_path))),
+                        group_id=source_ids.get(csv_name),
                     ))
                 matched_count += 1
             except Exception as e:
@@ -522,17 +542,19 @@ class ImageQualityDataset(Dataset):
 
         # 随机裁剪缩放（提升尺度泛化能力）
         rrc_config = aug_config.get("random_resized_crop", {})
+        # letterbox 必须先于随机裁剪：否则训练看到的是裁剪后的局部画面，
+        # 而验证/推理看到的是 letterbox 后的完整画面。
+        if use_letterbox:
+            fill_rgb = tuple(int(m * 255) for m in mean)
+            aug_list.append(LetterboxResize(image_size, fill=fill_rgb))
+
         if rrc_config.get("enable", False):
             aug_list.append(transforms.RandomResizedCrop(
                 size=image_size,
                 scale=tuple(rrc_config.get("scale", [0.8, 1.0])),
                 ratio=tuple(rrc_config.get("ratio", [0.9, 1.11])),
             ))
-        elif use_letterbox:
-            # 保持宽高比，padding 到目标尺寸
-            fill_rgb = tuple(int(m * 255) for m in mean)
-            aug_list.append(LetterboxResize(image_size, fill=fill_rgb))
-        else:
+        elif not use_letterbox:
             aug_list.append(transforms.Resize(image_size))
 
         # 随机水平翻转
@@ -659,6 +681,48 @@ def split_manifest(train_loader, val_loader):
     return {"method": "source_group_v1",
             "train_groups": sorted({source_group(s) for s in train_loader.dataset.samples}),
             "val_groups": sorted({source_group(s) for s in val_loader.dataset.samples})}
+
+
+def heldout_overlap(samples, manifest) -> List[str]:
+    """Source groups in `samples` that the checkpoint already saw in training or validation."""
+    seen = set(manifest.get("train_groups", [])) | set(manifest.get("val_groups", []))
+    return sorted({source_group(s) for s in samples} & seen)
+
+
+def create_eval_loader(
+    normal_dir: str,
+    exception_dir: str,
+    csv_filename: str,
+    image_exts: List[str],
+    video_exts: List[str],
+    image_size: Tuple[int, int],
+    mean: Tuple[float, float, float],
+    std: Tuple[float, float, float],
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    video_max_frames: int = 0,
+    video_frame_interval: float = 0.0,
+    use_letterbox: bool = False,
+) -> DataLoader:
+    """Loader over every sample under a held-out data root: no split, no augmentation."""
+    samples = scan_normal_samples(
+        normal_dir, image_exts, video_exts,
+        video_max_frames=video_max_frames,
+        video_frame_interval=video_frame_interval,
+    ) + scan_exception_samples(
+        exception_dir, csv_filename, image_exts, video_exts,
+        video_max_frames=video_max_frames,
+        video_frame_interval=video_frame_interval,
+    )
+    if not samples:
+        raise ValueError(f"No samples found under held-out data: {normal_dir}, {exception_dir}")
+    dataset = ImageQualityDataset(
+        samples, image_size=image_size, mean=mean, std=std,
+        is_train=False, use_letterbox=use_letterbox,
+    )
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                      num_workers=num_workers, pin_memory=pin_memory)
 
 
 def create_data_loaders(

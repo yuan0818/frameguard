@@ -96,6 +96,49 @@ def build_inference_transform(
     ])
 
 
+def detector_configs(config, template_dir: Optional[str] = None) -> Tuple[dict, dict]:
+    """
+    从配置的 detectors 节构建 (cv_config, advanced_config)。
+
+    cv_config 直接传给 analyze_cv_quality（各检测器的 enabled 与阈值生效）。
+    advanced_config 是 analyze_advanced 使用的扁平键。相对模板路径按项目根目录解析；
+    template_dir 给定时覆盖配置，约定其下有 crash/ 与 elements/ 两个子目录。
+    """
+    detectors = getattr(config, "detectors", None)
+    if hasattr(detectors, "to_dict"):
+        detectors = detectors.to_dict()
+    detectors = detectors or {}
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def resolve(path):
+        if not path:
+            return None
+        return path if os.path.isabs(path) else os.path.join(project_root, path)
+
+    still = detectors.get("still_frame") or {}
+    crash = detectors.get("crash") or {}
+    missing = detectors.get("missing_element") or {}
+
+    advanced = {
+        "crash_template_dir": resolve(crash.get("template_dir")),
+        "element_template_dir": resolve(missing.get("template_dir")),
+    }
+    if template_dir:
+        advanced["crash_template_dir"] = os.path.join(template_dir, "crash")
+        advanced["element_template_dir"] = os.path.join(template_dir, "elements")
+    for target, section, key in (
+        ("hist_correlation_threshold", still, "hist_correlation_threshold"),
+        ("min_still_frames", still, "min_still_frames"),
+        ("crash_match_threshold", crash, "match_threshold"),
+        ("element_match_threshold", missing, "match_threshold"),
+    ):
+        if key in section:
+            advanced[target] = section[key]
+
+    return detectors, advanced
+
+
 def load_model(checkpoint_path: str, config, device: torch.device) -> ImageQualityCNN:
     """
     加载训练好的模型。
@@ -133,6 +176,9 @@ def predict_single_image(
     class_names: Dict[int, str],
     enable_ui_analysis: bool = False,
     enable_cv_analysis: bool = False,
+    cv_config: Optional[dict] = None,
+    enable_advanced_analysis: bool = False,
+    advanced_config: Optional[dict] = None,
 ) -> Dict:
     """
     对单张图片进行推理。
@@ -145,11 +191,14 @@ def predict_single_image(
         class_names: 类别 ID → 名称映射
         enable_ui_analysis: 是否启用 UI 布局深度分析（需要 ui_detector 模块）
         enable_cv_analysis: 是否启用传统 CV 质量检测（需要 cv_detectors 模块）
+        cv_config: 配置的 detectors 节（None 时使用检测器默认参数）
+        enable_advanced_analysis: 是否对这张图片做 Crash 弹窗/元素缺失检测
+        advanced_config: analyze_advanced 的配置（见 detector_configs）
 
     Returns:
         {"class_id": int, "class_name": str, "confidence": float,
          "probabilities": {...}, "ui_analysis": {...} 或 None,
-         "cv_analysis": {...} 或 None}
+         "cv_analysis": {...} 或 None, "advanced_analysis": {...} 或 None}
     """
     # 加载图片
     if isinstance(image, str):
@@ -211,10 +260,18 @@ def predict_single_image(
     cv_analysis = None
     if enable_cv_analysis and HAS_CV_DETECTOR:
         try:
-            cv_result = analyze_cv_quality(img)
+            cv_result = analyze_cv_quality(img, config=cv_config)
             cv_analysis = cv_result.to_dict()
         except Exception as e:
             cv_analysis = {"error": str(e)}
+
+    # 高级检测（可选，单张图片：Crash 弹窗 / 元素缺失）
+    advanced_analysis = None
+    if enable_advanced_analysis and HAS_ADVANCED_DETECTOR:
+        try:
+            advanced_analysis = analyze_advanced(img, is_video=False, config=advanced_config).to_dict()
+        except Exception as e:
+            advanced_analysis = {"error": str(e)}
 
     return {
         "class_id": pred_class,
@@ -223,6 +280,7 @@ def predict_single_image(
         "probabilities": prob_dict,
         "ui_analysis": ui_analysis,
         "cv_analysis": cv_analysis,
+        "advanced_analysis": advanced_analysis,
     }
 
 
@@ -234,13 +292,19 @@ def predict_image(
     class_names: Dict[int, str],
     enable_ui_analysis: bool = False,
     enable_cv_analysis: bool = False,
+    cv_config: Optional[dict] = None,
+    enable_advanced_analysis: bool = False,
+    advanced_config: Optional[dict] = None,
 ) -> Dict:
     """
     对单张图片文件进行推理。
     """
     result = predict_single_image(image_path, model, transform, device, class_names,
                                   enable_ui_analysis=enable_ui_analysis,
-                                  enable_cv_analysis=enable_cv_analysis)
+                                  enable_cv_analysis=enable_cv_analysis,
+                                  cv_config=cv_config,
+                                  enable_advanced_analysis=enable_advanced_analysis,
+                                  advanced_config=advanced_config)
     result["file_path"] = image_path
     return result
 
@@ -256,6 +320,8 @@ def predict_video(
     enable_ui_analysis: bool = False,
     enable_cv_analysis: bool = False,
     enable_advanced_analysis: bool = False,
+    cv_config: Optional[dict] = None,
+    advanced_config: Optional[dict] = None,
 ) -> Dict:
     """
     对视频进行逐帧推理，汇总结果。
@@ -297,7 +363,8 @@ def predict_video(
 
         result = predict_single_image(frame, model, transform, device, class_names,
                                       enable_ui_analysis=enable_ui_analysis,
-                                      enable_cv_analysis=enable_cv_analysis)
+                                      enable_cv_analysis=enable_cv_analysis,
+                                      cv_config=cv_config)
         result["frame_index"] = idx
         result["timestamp"] = idx / fps if fps > 0 else 0.0
         frame_results.append(result)
@@ -330,7 +397,7 @@ def predict_video(
     advanced_analysis = None
     if enable_advanced_analysis and HAS_ADVANCED_DETECTOR and pil_frames:
         try:
-            adv_result = analyze_advanced(pil_frames, is_video=True, config=None)
+            adv_result = analyze_advanced(pil_frames, is_video=True, config=advanced_config)
             advanced_analysis = adv_result.to_dict()
         except Exception as e:
             advanced_analysis = {"error": str(e)}
@@ -359,6 +426,8 @@ def predict_directory(
     enable_ui_analysis: bool = False,
     enable_cv_analysis: bool = False,
     enable_advanced_analysis: bool = False,
+    cv_config: Optional[dict] = None,
+    advanced_config: Optional[dict] = None,
 ) -> List[Dict]:
     """
     对目录中的所有图片和视频进行批量推理。
@@ -391,7 +460,10 @@ def predict_directory(
             if is_image_file(file_path):
                 result = predict_image(file_path, model, transform, device, class_names,
                                        enable_ui_analysis=enable_ui_analysis,
-                                       enable_cv_analysis=enable_cv_analysis)
+                                       enable_cv_analysis=enable_cv_analysis,
+                                       cv_config=cv_config,
+                                       enable_advanced_analysis=enable_advanced_analysis,
+                                       advanced_config=advanced_config)
                 result["source_type"] = "image"
                 results.append(result)
             elif is_video_file(file_path):
@@ -402,6 +474,8 @@ def predict_directory(
                     enable_ui_analysis=enable_ui_analysis,
                     enable_cv_analysis=enable_cv_analysis,
                     enable_advanced_analysis=enable_advanced_analysis,
+                    cv_config=cv_config,
+                    advanced_config=advanced_config,
                 )
                 result["source_type"] = "video"
                 results.append(result)
@@ -559,7 +633,7 @@ def main():
         "--template-dir",
         type=str,
         default=None,
-        help="检测模板目录（Crash/元素缺失检测用）",
+        help="检测模板目录，需包含 crash/ 与 elements/ 子目录；覆盖配置中的 template_dir",
     )
     args = parser.parse_args()
 
@@ -593,6 +667,9 @@ def main():
         use_letterbox=use_letterbox,
     )
 
+    # 检测器配置（detectors 节 + --template-dir）
+    cv_config, advanced_config = detector_configs(config, args.template_dir)
+
     input_path = args.input
 
     print(f"\n{'='*60}")
@@ -606,7 +683,10 @@ def main():
             print("\n[单张图片推理]")
             result = predict_image(input_path, model, transform, device, class_names,
                                    enable_ui_analysis=args.ui_analysis,
-                                   enable_cv_analysis=args.cv_analysis)
+                                   enable_cv_analysis=args.cv_analysis,
+                                   cv_config=cv_config,
+                                   enable_advanced_analysis=args.advanced_analysis,
+                                   advanced_config=advanced_config)
             print_single_result(result)
             results = result
 
@@ -619,6 +699,8 @@ def main():
                 enable_ui_analysis=args.ui_analysis,
                 enable_cv_analysis=args.cv_analysis,
                 enable_advanced_analysis=args.advanced_analysis,
+                cv_config=cv_config,
+                advanced_config=advanced_config,
             )
             print_video_result(result)
             results = result
@@ -636,6 +718,8 @@ def main():
             enable_ui_analysis=args.ui_analysis,
             enable_cv_analysis=args.cv_analysis,
             enable_advanced_analysis=args.advanced_analysis,
+            cv_config=cv_config,
+            advanced_config=advanced_config,
         )
 
         # 汇总统计

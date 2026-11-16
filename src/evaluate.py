@@ -9,7 +9,7 @@
 import os
 import sys
 import argparse
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import load_config, get_default_config, config_for_checkpoint
 from src.model import ImageQualityCNN, create_model
-from src.dataset import create_data_loaders, source_group
+from src.dataset import create_data_loaders, create_eval_loader, heldout_overlap, source_group
 
 
 def get_device() -> torch.device:
@@ -132,6 +132,7 @@ def evaluate(
     config,
     output_confusion_matrix: bool = True,
     allow_legacy_evaluation: bool = False,
+    data_root: Optional[str] = None,
 ) -> Dict:
     """
     执行完整评估流程。
@@ -140,6 +141,9 @@ def evaluate(
         checkpoint_path: 模型权重路径
         config: Config 对象
         output_confusion_matrix: 是否输出混淆矩阵图
+        data_root: 独立留出数据的根目录（与训练数据相同的 normal/ + exception/ 布局）。
+            指定时评估其中全部样本，并拒绝与训练/验证来源重叠的数据；
+            不指定时评估 checkpoint 记录的验证划分。
 
     Returns:
         评估指标字典
@@ -163,35 +167,65 @@ def evaluate(
         print("WARNING: legacy checkpoint; these metrics are NOT an independent benchmark.")
 
     # --- 加载数据 ---
-    normal_dir = os.path.join(project_root, config.data.root_dir, config.data.normal_dir)
-    exception_dir = os.path.join(project_root, config.data.root_dir, config.data.exception_dir)
-
     use_letterbox = getattr(config.data, "letterbox", False)
 
-    _, val_loader = create_data_loaders(
-        normal_dir=normal_dir,
-        exception_dir=exception_dir,
-        csv_filename=config.data.csv_filename,
-        image_exts=config.data.image_extensions,
-        video_exts=config.data.video_extensions,
-        image_size=tuple(config.data.image_size),
-        mean=tuple(config.data.mean),
-        std=tuple(config.data.std),
-        batch_size=config.train.batch_size,
-        num_workers=config.train.num_workers,
-        pin_memory=config.train.pin_memory,
-        train_ratio=config.data.split.train_ratio,
-        val_ratio=config.data.split.val_ratio,
-        random_seed=config.data.split.random_seed,
-        video_max_frames=config.data.video.max_frames_per_video,
-        video_frame_interval=config.data.video.frame_interval_sec,
-        use_letterbox=use_letterbox,
-    )
+    if data_root:
+        data_root = os.path.abspath(data_root)
+        print(f"留出数据: {data_root}")
+        eval_loader = create_eval_loader(
+            normal_dir=os.path.join(data_root, config.data.normal_dir),
+            exception_dir=os.path.join(data_root, config.data.exception_dir),
+            csv_filename=config.data.csv_filename,
+            image_exts=config.data.image_extensions,
+            video_exts=config.data.video_extensions,
+            image_size=tuple(config.data.image_size),
+            mean=tuple(config.data.mean),
+            std=tuple(config.data.std),
+            batch_size=config.train.batch_size,
+            num_workers=config.train.num_workers,
+            pin_memory=config.train.pin_memory,
+            video_max_frames=config.data.video.max_frames_per_video,
+            video_frame_interval=config.data.video.frame_interval_sec,
+            use_letterbox=use_letterbox,
+        )
+        if saved_split is not None:
+            overlap = heldout_overlap(eval_loader.dataset.samples, saved_split)
+            if overlap:
+                raise ValueError(
+                    f"Held-out data shares {len(overlap)} source group(s) with training/validation "
+                    f"(e.g. {overlap[:5]}); it is not an independent test set."
+                )
+    else:
+        normal_dir = os.path.join(project_root, config.data.root_dir, config.data.normal_dir)
+        exception_dir = os.path.join(project_root, config.data.root_dir, config.data.exception_dir)
 
-    if saved_split is not None:
-        actual_groups = {source_group(s) for s in val_loader.dataset.samples}
-        if actual_groups != set(saved_split["val_groups"]) or actual_groups & set(saved_split["train_groups"]):
-            raise ValueError("Dataset split changed since training; use the original data/config")
+        _, eval_loader = create_data_loaders(
+            normal_dir=normal_dir,
+            exception_dir=exception_dir,
+            csv_filename=config.data.csv_filename,
+            image_exts=config.data.image_extensions,
+            video_exts=config.data.video_extensions,
+            image_size=tuple(config.data.image_size),
+            mean=tuple(config.data.mean),
+            std=tuple(config.data.std),
+            batch_size=config.train.batch_size,
+            num_workers=config.train.num_workers,
+            pin_memory=config.train.pin_memory,
+            train_ratio=config.data.split.train_ratio,
+            val_ratio=config.data.split.val_ratio,
+            random_seed=config.data.split.random_seed,
+            video_max_frames=config.data.video.max_frames_per_video,
+            video_frame_interval=config.data.video.frame_interval_sec,
+            use_letterbox=use_letterbox,
+        )
+
+        if saved_split is not None:
+            actual_groups = {source_group(s) for s in eval_loader.dataset.samples}
+            if actual_groups != set(saved_split["val_groups"]) or actual_groups & set(saved_split["train_groups"]):
+                raise ValueError("Dataset split changed since training; use the original data/config")
+
+    if any(s.label >= config.model.num_classes for s in eval_loader.dataset.samples):
+        raise ValueError("Dataset labels exceed configured num_classes")
 
     # --- 加载模型 ---
     backbone = getattr(config.model, "backbone", None)
@@ -209,18 +243,19 @@ def evaluate(
     model = model.to(device)
 
     # --- 评估 ---
-    labels, preds = evaluate_model(model, val_loader, device)
+    labels, preds = evaluate_model(model, eval_loader, device)
 
     # --- 计算指标 ---
     accuracy = accuracy_score(labels, preds)
     precision, recall, f1, support = precision_recall_fscore_support(
         labels, preds, labels=list(range(config.model.num_classes)), average=None, zero_division=0
     )
+    all_class_ids = list(range(config.model.num_classes))
     precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
-        labels, preds, average="macro", zero_division=0
+        labels, preds, labels=all_class_ids, average="macro", zero_division=0
     )
     precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
-        labels, preds, average="weighted", zero_division=0
+        labels, preds, labels=all_class_ids, average="weighted", zero_division=0
     )
 
     # 类别名称
@@ -282,7 +317,7 @@ def evaluate(
         cm_path = os.path.join(
             project_root,
             config.output.log_dir,
-            config.output.confusion_matrix_name,
+            ("heldout_" if data_root else "") + config.output.confusion_matrix_name,
         )
         plot_confusion_matrix(cm, class_names, cm_path, "Confusion Matrix - Image Quality Classifier")
 
@@ -327,6 +362,13 @@ def main():
         help="不生成混淆矩阵图片",
     )
     parser.add_argument("--allow-legacy-evaluation", action="store_true", help="Diagnostic only: allow weights without split provenance")
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help="独立留出数据根目录（含 normal/ 与 exception/data.csv）；评估其中全部样本，"
+             "并拒绝与训练/验证来源重叠的数据",
+    )
     args = parser.parse_args()
 
     config = config_for_checkpoint(args.checkpoint, args.config)
@@ -346,6 +388,7 @@ def main():
         config=config,
         output_confusion_matrix=not args.no_cm,
         allow_legacy_evaluation=args.allow_legacy_evaluation,
+        data_root=args.data_root,
     )
 
 

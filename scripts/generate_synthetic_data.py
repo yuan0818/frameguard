@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.generate_corruptions import CORRUPTION_REGISTRY
 
 
-def generate(out, sources=20, seed=42):
+def generate(out, sources=20, seed=42, prefix="demo"):
     out = Path(out)
     if sources < 2:
         raise ValueError("Need at least two independent sources")
@@ -28,7 +28,7 @@ def generate(out, sources=20, seed=42):
         phase = np.random.uniform(0, 6, 3)
         img = np.stack([128 + 70 * np.sin(xx / (13 + i) + v) * np.cos(yy / (17 + i)) for v in phase], axis=-1)
         img = np.clip(img + np.random.normal(0, 6, img.shape), 0, 255).astype(np.uint8)
-        stem = f"demo_{i:04d}"
+        stem = f"{prefix}_{i:04d}"
         Image.fromarray(img).save(normal / f"{stem}.png")
         for name, spec in CORRUPTION_REGISTRY.items():
             filename = f"{stem}_{name}_v00.png"
@@ -46,8 +46,9 @@ def main():
     ap.add_argument("--out", default="data/demo")
     ap.add_argument("--sources", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--prefix", default="demo", help="source name prefix; use a different one for held-out data")
     args = ap.parse_args()
-    print(generate(args.out, args.sources, args.seed))
+    print(generate(args.out, args.sources, args.seed, args.prefix))
 
 
 if __name__ == "__main__":

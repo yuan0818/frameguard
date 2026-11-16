@@ -270,7 +270,7 @@ def _rule_based_crash_detect(
         (match_score, location_dict_or_None)
     """
     h, w = frame_rgb.shape[:2]
-    gray = cv2.cvtColor(frame_rgb, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
 
     # 中心 60% 区域
     cx1 = int(w * 0.2)
@@ -541,6 +541,7 @@ def analyze_advanced(
             - min_still_frames (int): 最小连续静止帧数
             - crash_template_dir (str): Crash 弹窗模板目录
             - crash_match_threshold (float): Crash 匹配阈值
+            - crash_max_frames (int): 视频中用于 Crash 检测的均匀采样帧数（默认 5）
             - element_template_dir (str): 元素模板目录
             - element_match_threshold (float): 元素匹配阈值
 
@@ -559,22 +560,33 @@ def analyze_advanced(
         )
 
     # --- 图片/视频帧：Crash 弹窗检测 + 元素缺失检测 ---
-    # 选取代表性帧（视频取第一帧，单图直接用）
     if isinstance(image_or_frames, list):
         if len(image_or_frames) == 0:
             return result
-        representative = image_or_frames[0]
+        frames = image_or_frames
     else:
-        representative = image_or_frames
+        frames = [image_or_frames]
 
-    frame_rgb = _pil_to_rgb(representative)
+    # Crash 弹窗检测：视频在均匀采样的若干帧上检测，保留最可疑的一帧
+    # （弹窗通常不会出现在第一帧）。
+    max_crash_frames = max(1, int(cfg.get("crash_max_frames", 5)))
+    positions = sorted(set(
+        np.linspace(0, len(frames) - 1, min(len(frames), max_crash_frames), dtype=int).tolist()
+    ))
+    best_crash: Optional[DetectorResult] = None
+    for pos in positions:
+        crash = detect_crash_dialog(
+            frame_rgb=_pil_to_rgb(frames[pos]),
+            template_dir=cfg.get("crash_template_dir"),
+            match_threshold=cfg.get("crash_match_threshold", 0.7),
+        )
+        crash.details["sampled_frame_position"] = int(pos)
+        if best_crash is None or (crash.is_anomaly, crash.confidence) > (best_crash.is_anomaly, best_crash.confidence):
+            best_crash = crash
+    result.crash = best_crash
 
-    # Crash 弹窗检测
-    result.crash = detect_crash_dialog(
-        frame_rgb=frame_rgb,
-        template_dir=cfg.get("crash_template_dir"),
-        match_threshold=cfg.get("crash_match_threshold", 0.7),
-    )
+    # 元素缺失检测使用代表性帧（视频取第一帧，单图直接用）
+    frame_rgb = _pil_to_rgb(frames[0])
 
     # 元素缺失检测
     result.missing_elements = detect_missing_elements(

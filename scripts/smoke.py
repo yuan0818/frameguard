@@ -31,6 +31,9 @@ def main():
         run("-m", "src.train", "--config", config, "--device", "cpu")
         checkpoint = tmp / "checkpoints/best_model.pth"
         run("-m", "src.evaluate", "--checkpoint", checkpoint, "--no-cm")
+        run("scripts/generate_synthetic_data.py", "--out", tmp / "heldout", "--sources", 3,
+            "--seed", 7, "--prefix", "heldout")
+        run("-m", "src.evaluate", "--checkpoint", checkpoint, "--no-cm", "--data-root", tmp / "heldout")
         run("-m", "src.predict", "-i", tmp / "data/normal/demo_0000.png", "-c", checkpoint,
             "--cv-analysis", "-o", tmp / "prediction.json")
         run("scripts/export_model.py", "--checkpoint", checkpoint, "--format", "pytorch", "--output-dir", tmp / "export")
