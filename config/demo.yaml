@@ -1,0 +1,126 @@
+data:
+  root_dir: data/demo
+  normal_dir: normal
+  exception_dir: exception
+  csv_filename: data.csv
+  image_extensions:
+  - .jpg
+  - .jpeg
+  - .png
+  - .bmp
+  - .tiff
+  - .webp
+  video_extensions:
+  - .mp4
+  - .avi
+  - .mov
+  - .mkv
+  - .flv
+  - .wmv
+  video:
+    max_frames_per_video: 300
+    frame_interval_sec: 1.0
+  split:
+    train_ratio: 0.8
+    val_ratio: 0.2
+    random_seed: 42
+  image_size:
+  - 224
+  - 224
+  letterbox: false
+  mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  std:
+  - 0.229
+  - 0.224
+  - 0.225
+  augmentation:
+    random_resized_crop:
+      enable: true
+      scale:
+      - 0.8
+      - 1.0
+      ratio:
+      - 0.9
+      - 1.11
+    random_horizontal_flip: true
+    random_rotation_degrees: 10
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.1
+model:
+  num_classes: 7
+  dropout_rate: 0.3
+  classifier_dropout: 0.3
+  input_channels: 3
+  backbone: null
+  freeze_backbone: true
+  class_names:
+    0: normal
+    1: screen_corruption
+    2: black_screen
+    3: green_screen
+    4: blocking_artifact
+    5: mosaic
+    6: color_space_error
+train:
+  num_epochs: 1
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  label_smoothing: 0.1
+  grad_clip_norm: 1.0
+  use_amp: false
+  lr_scheduler:
+    type: reduce_on_plateau
+    factor: 0.5
+    patience: 10
+    min_lr: 1.0e-06
+    step_size: 30
+    gamma: 0.1
+  num_workers: 0
+  pin_memory: false
+  early_stopping_patience: 25
+  resume_checkpoint: ''
+  class_weights: balanced
+  log_interval: 10
+output:
+  checkpoint_dir: outputs/demo/checkpoints
+  log_dir: outputs/demo/logs
+  best_model_name: best_model.pth
+  last_model_name: last_model.pth
+  confusion_matrix_name: confusion_matrix.png
+detectors:
+  blur:
+    enabled: true
+    laplacian_variance_threshold: 100.0
+  exposure:
+    enabled: true
+    overexposure_brightness: 240
+    underexposure_brightness: 15
+    overexposure_ratio: 0.95
+    underexposure_ratio: 0.05
+  truncation:
+    enabled: true
+    border_width_ratio: 0.05
+    min_edge_element_area_ratio: 0.01
+  blank_region:
+    enabled: true
+    max_area_ratio: 0.4
+    color_std_threshold: 10
+  still_frame:
+    enabled: false
+    hist_correlation_threshold: 0.95
+    min_still_frames: 5
+  crash:
+    enabled: false
+    template_dir: data/templates/crash
+    match_threshold: 0.7
+  missing_element:
+    enabled: false
+    template_dir: data/templates/elements
+    match_threshold: 0.6
