@@ -1,4 +1,6 @@
-# imageClassify · Experimental v0.1
+# FrameGuard · Experimental v0.1
+
+仓库与目录名：`frameguard`。
 
 基于 PyTorch 的图片/视频质量分类实验项目。包含残差 CNN、可选 torchvision
 backbone、训练、评估、图片/视频推理以及权重导出。代码采用 [MIT](LICENSE)。

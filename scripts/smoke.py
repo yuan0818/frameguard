@@ -19,7 +19,7 @@ def run(*args):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="image-smoke-") as temp:
+    with tempfile.TemporaryDirectory(prefix="frameguard-smoke-") as temp:
         tmp = Path(temp)
         cfg = yaml.safe_load((ROOT / "config/demo.yaml").read_text())
         cfg["data"]["root_dir"] = str(tmp / "data")
@@ -36,7 +36,7 @@ def main():
         run("scripts/export_model.py", "--checkpoint", checkpoint, "--format", "pytorch", "--output-dir", tmp / "export")
         assert json.loads((tmp / "prediction.json").read_text())
         assert (tmp / "export/model.pth").exists()
-    print("PASS image train/evaluate/predict/export; temporary artifacts removed")
+    print("PASS FrameGuard train/evaluate/predict/export; temporary artifacts removed")
 
 
 if __name__ == "__main__":
