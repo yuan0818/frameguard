@@ -1,0 +1,145 @@
+# ============================================================
+# 图片/视频质量检测 CNN 分类器 - 默认配置
+# ============================================================
+
+# --- 数据配置 ---
+data:
+  root_dir: "data"                    # 数据根目录（相对于项目根目录）
+  normal_dir: "normal"                # 正常数据子目录
+  exception_dir: "exception"          # 异常数据子目录
+  csv_filename: "data.csv"            # 异常目录下的CSV文件名
+
+  # 支持的图片格式
+  image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
+  # 支持的视频格式
+  video_extensions: [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv"]
+
+  # 视频帧采样策略
+  video:
+    max_frames_per_video: 300         # 单个视频最多提取帧数（均匀采样），0 表示不限制
+    frame_interval_sec: 1.0           # 帧间隔（秒），0 表示提取全部帧
+
+  # 数据集划分
+  split:
+    train_ratio: 0.8                  # 训练集比例
+    val_ratio: 0.2                    # 验证集比例
+    random_seed: 42                   # 随机种子，保证可复现
+
+  # 输入图像尺寸
+  image_size: [224, 224]              # [height, width]
+  # 保持宽高比：非方形输入（如 UI 截图）使用 letterbox 填充而非强制拉伸
+  letterbox: true
+  # 归一化参数（ImageNet 均值/标准差）
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+  # 数据增强（训练时）
+  augmentation:
+    random_resized_crop:              # 随机裁剪缩放（提升尺度泛化能力）
+      enable: true
+      scale: [0.8, 1.0]              # 裁剪面积范围（相对于原图）
+      ratio: [0.9, 1.11]             # 宽高比范围
+    random_horizontal_flip: true
+    random_rotation_degrees: 10       # 随机旋转角度范围
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.1
+
+# --- 模型配置 ---
+model:
+  num_classes: 10
+  dropout_rate: 0.3                   # 卷积层后的 Dropout（从 0.5 降低，避免过度正则化）
+  classifier_dropout: 0.3             # 分类头中的 Dropout
+  input_channels: 3                   # RGB 三通道，不进行灰度化
+
+  # 预训练 backbone（可选）
+  # null = 使用自定义 CNN（ImageQualityCNN）
+  # "resnet18" / "resnet34" / "resnet50" / "efficientnet_b0" = 使用 torchvision 预训练模型
+  backbone: null
+  freeze_backbone: true               # 是否冻结 backbone 权重（仅微调分类头）
+
+  # 类别映射（标签ID → 类别名）
+  class_names:
+    0: "normal"
+    1: "screen_corruption"            # 花屏
+    2: "black_screen"                 # 黑屏
+    3: "green_screen"                 # 绿屏
+    4: "blocking_artifact"           # 块效应
+    5: "mosaic"                       # 马赛克
+    6: "color_space_error"           # 色彩空间出错
+    7: "ui_layout_misalignment"      # UI 布局错位
+    8: "ui_element_overlap"          # UI 元素重叠
+    9: "ui_text_overlap"             # UI 文本重叠
+
+# --- 训练配置 ---
+train:
+  num_epochs: 100                     # 训练轮数
+  batch_size: 32                      # 批次大小
+  learning_rate: 0.001                # 初始学习率
+  weight_decay: 0.0001                # L2 正则化系数
+  label_smoothing: 0.1                # 标签平滑（防止过拟合、校准置信度）
+  grad_clip_norm: 1.0                 # 梯度裁剪阈值（0=不裁剪）
+  use_amp: true                       # 混合精度训练（GPU 可提速 30-50%）
+
+  lr_scheduler:
+    type: "reduce_on_plateau"         # 学习率调度器类型：reduce_on_plateau, step, cosine
+    factor: 0.5                       # 学习率衰减因子
+    patience: 10                      # 验证指标不提升的容忍轮数
+    min_lr: 0.000001                  # 最小学习率
+    step_size: 30                     # StepLR 每多少轮衰减
+    gamma: 0.1                        # StepLR 衰减因子
+
+  num_workers: 4                      # DataLoader 工作线程数
+  pin_memory: true                    # 是否使用锁页内存（GPU训练建议开启）
+  early_stopping_patience: 25         # 早停轮数，0 表示不早停
+
+  # 断点续训
+  resume_checkpoint: ""               # 留空则从头训练，否则填入 checkpoint 路径
+
+  # 类别不平衡处理
+  class_weights: "balanced"           # "balanced" 自动计算，null 不处理
+
+  # 日志
+  log_interval: 10                    # 每 N 个 batch 打印一次日志
+
+# --- 输出配置 ---
+output:
+  checkpoint_dir: "outputs/checkpoints"
+  log_dir: "outputs/logs"
+  best_model_name: "best_model.pth"
+  last_model_name: "last_model.pth"
+  confusion_matrix_name: "confusion_matrix.png"
+
+# --- CV 检测器配置（后处理，不影响 CNN 分类） ---
+detectors:
+  blur:
+    enabled: true
+    laplacian_variance_threshold: 100.0
+  exposure:
+    enabled: true
+    overexposure_brightness: 240
+    underexposure_brightness: 15
+    overexposure_ratio: 0.95
+    underexposure_ratio: 0.05
+  truncation:
+    enabled: true
+    border_width_ratio: 0.05
+    min_edge_element_area_ratio: 0.01
+  blank_region:
+    enabled: true
+    max_area_ratio: 0.40
+    color_std_threshold: 10
+  still_frame:
+    enabled: false
+    hist_correlation_threshold: 0.95
+    min_still_frames: 5
+  crash:
+    enabled: false
+    template_dir: "data/templates/crash"
+    match_threshold: 0.7
+  missing_element:
+    enabled: false
+    template_dir: "data/templates/elements"
+    match_threshold: 0.6
