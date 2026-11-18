@@ -1,12 +1,60 @@
 # FrameGuard · Experimental v0.1
 
-基于 PyTorch 的图片/视频质量分类实验项目。包含残差 CNN、可选 torchvision
+简体中文 | [English](README.en.md)
+
+基于 PyTorch 的图片/视频画面质量分类实验项目。包含残差 CNN、可选 torchvision
 backbone、训练、评估、图片/视频推理以及权重导出。代码采用 [MIT](LICENSE)。
 
-默认 **7 类**：normal、screen_corruption、black_screen、green_screen、
-blocking_artifact、mosaic、color_space_error。`config/ui.yaml` 提供额外 3 个
-UI 类别，需要另行准备数据并训练 10 类权重。传统 CV/UI 后处理不是新增类别
-已经训练有效的证明。
+## 能力范围
+
+FrameGuard 判断一张图片或一个视频帧是否存在下列**画面技术故障**。它不理解
+画面内容，也不处理音频。
+
+### CNN 分类
+
+每张图片或每个采样帧输出一个类别和各类别的 softmax 概率（单标签，不定位
+故障位置）。默认 7 类：
+
+| ID | 类别 | 含义 |
+|---|---|---|
+| 0 | `normal` | 无下列故障 |
+| 1 | `screen_corruption` | 花屏：彩色横纹、随机色块、画面撕裂 |
+| 2 | `black_screen` | 黑屏：画面几乎全黑 |
+| 3 | `green_screen` | 绿屏：画面整体被绿色覆盖 |
+| 4 | `blocking_artifact` | 块效应：编码压缩产生的方块伪影 |
+| 5 | `mosaic` | 马赛克：全图或局部像素化 |
+| 6 | `color_space_error` | 色彩空间出错：通道错乱、色相偏移、饱和度异常 |
+
+`config/ui.yaml` 另加 3 个 UI 类别：7 `ui_layout_misalignment`（布局错位）、
+8 `ui_element_overlap`（元素重叠）、9 `ui_text_overlap`（文本重叠），需自行
+准备数据并训练 10 类权重。
+
+- **输入**：图片（jpg、png、bmp、tiff、webp）、视频（mp4、avi、mov、mkv、flv、
+  wmv、webm）或目录（递归处理）。模型输入为 224×224 RGB，非方形画面可选 letterbox。
+- **视频**：默认每秒取一帧、最多 300 帧（`--frame-interval`、`--max-frames`），
+  逐帧分类后按多数投票给出整体类别。`overall_confidence` 是该类别的帧数占比，
+  不是模型置信度；短暂故障可能被正常帧淹没，应同时查看逐帧结果和
+  `class_distribution`。
+- **训练数据**：异常样本由 `scripts/generate_corruptions.py` 在正常图片上合成。
+  在真实设备或编码故障上的准确率尚未经独立测试验证，见下文“结果限制”。
+
+### 可选规则检测
+
+以下检测基于 OpenCV 规则，阈值读取配置的 `detectors` 节，与 CNN 类别相互独立，
+未经标注数据校准。
+
+| 参数 | 检测项 | 方法 |
+|---|---|---|
+| `--cv-analysis` | 模糊、过曝/欠曝、边缘截断、大面积空白 | Laplacian 方差；亮度直方图；触及两条以上边界的前景区域；局部低方差连通域 |
+| `--ui-analysis` | UI 布局错位、元素重叠、文本重叠 | 边缘与色块检测元素，Sobel + MSER 检测文本；参数按约 224×400 的截图设定 |
+| `--advanced-analysis` | 静止帧（仅视频）、Crash 弹窗、UI 元素缺失 | 相邻采样帧灰度直方图相关性；模板匹配，无模板时用画面中心亮矩形规则兜底；元素模板匹配，无模板时跳过 |
+
+### 不支持
+
+- **音频**：不读取音轨，不能检测无声、爆音、音画不同步等问题。
+- **画面内容**：不识别物体、人物、场景、文字含义或视频主题。
+- **时间类故障**：除静止帧外，不检测卡顿、掉帧或帧率异常。
+- **多标签与定位**：每帧只给出一个 CNN 类别，不输出故障区域。
 
 ## 安装与验证
 
@@ -22,8 +70,7 @@ python scripts/smoke.py
 
 Windows 激活命令为 `.venv\Scripts\activate`。冒烟在临时目录生成数据、训练
 一轮、评估（验证划分和另行生成的留出集）、推理和导出，不需要下载数据，也不
-覆盖已有模型。CI 在 Linux CPU
-上执行相同检查；实际执行结果见 [验证记录](docs/VALIDATION.md)。
+覆盖已有模型。CI 在 Linux CPU 上执行相同检查；实际执行结果见 [验证记录](docs/VALIDATION.md)。
 
 ## 最小训练示例
 
